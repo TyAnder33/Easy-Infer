@@ -1,9 +1,13 @@
 #pragma once
 
+#include <filesystem>
+#include <string_view>
 #include <vector>
 
 #include "easyinfer/model.hpp"
+#include "easyinfer/model_config.hpp"
 #include "easyinfer/tensor.hpp"
+#include "easyinfer/weight_store.hpp"
 
 namespace easyinfer {
 
@@ -43,11 +47,19 @@ struct GPT2Weights {
 
 class GPT2 final : public Model {
 public:
-    GPT2() = default;
+    GPT2(ModelConfig config,
+         const std::filesystem::path& model_directory,
+         const std::vector<TensorMetadata>& metadata);
 
+    [[nodiscard]] std::string_view name() const override;
+    [[nodiscard]] std::size_t weight_count() const override;
     void forward() override;
 
 private:
+    void validate_tensors() const;
+
+    ModelConfig config_;
+    WeightStore host_weights_;
     GPT2Weights weights_;
 };
 

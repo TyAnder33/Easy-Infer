@@ -15,6 +15,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 add_library(easyinfer_core
     src/gpt2.cpp
     src/model_config.cpp
+    src/model_registry.cpp
     src/weight_store.cpp
 )
 target_include_directories(easyinfer_core PUBLIC include)
