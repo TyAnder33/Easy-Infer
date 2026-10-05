@@ -13,11 +13,12 @@ namespace {
 struct CliOptions {
     std::filesystem::path model_directory;
     bool inspect{false};
+    bool gpu{false};
 };
 
 [[noreturn]] void usage_error(std::string_view message) {
     throw std::runtime_error(std::string(message) +
-                             "\nusage: engine --model <directory> --inspect");
+                             "\nusage: engine --model <directory> --inspect [--gpu]");
 }
 
 CliOptions parse_cli(int argc, char** argv) {
@@ -32,6 +33,8 @@ CliOptions parse_cli(int argc, char** argv) {
             options.model_directory = argv[i];
         } else if (argument == "--inspect") {
             options.inspect = true;
+        } else if (argument == "--gpu") {
+            options.gpu = true;
         } else {
             usage_error("unknown argument: " + std::string(argument));
         }
@@ -86,21 +89,26 @@ void print_safetensors_metadata(
 
 int main(int argc, char** argv) {
     try {
-
         const auto options = parse_cli(argc, argv);
         const auto config =
             easyinfer::load_model_config(options.model_directory);
-        
-        const auto safetensor_metadata = easyinfer::load_safetensors_metadata(options.model_directory);
+        const auto safetensor_metadata =
+            easyinfer::load_safetensors_metadata(options.model_directory);
 
         const auto model = easyinfer::create_model(
             config, options.model_directory, safetensor_metadata);
 
-    
+        if (options.gpu) {
+            model->load_device_weights();
+        }
+
         print_config(config);
         print_safetensors_metadata(safetensor_metadata);
         std::cout << "\nSelected " << model->name() << '\n'
                   << "Validated " << model->weight_count() << " tensors\n";
+        if (options.gpu) {
+            std::cout << "Uploaded and bound GPU weights\n";
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';

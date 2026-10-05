@@ -23,6 +23,49 @@ std::size_t GPT2::weight_count() const {
     return host_weights_.size();
 }
 
+void GPT2::load_device_weights() {
+#ifdef EASYINFER_ENABLE_CUDA
+    device_weights_.load(host_weights_);
+    bind_device_weights();
+#else
+    throw std::runtime_error("CUDA support is not enabled");
+#endif
+}
+
+#ifdef EASYINFER_ENABLE_CUDA
+void GPT2::bind_device_weights() {
+    const auto linear = [this](const std::string& prefix) {
+        return GPT2LinearWeights{
+            .weight = device_weights_.at(prefix + ".weight"),
+            .bias = device_weights_.at(prefix + ".bias"),
+        };
+    };
+    const auto layer_norm = [this](const std::string& prefix) {
+        return GPT2LayerNormWeights{
+            .weight = device_weights_.at(prefix + ".weight"),
+            .bias = device_weights_.at(prefix + ".bias"),
+        };
+    };
+
+    weights_.token_embedding = device_weights_.at("wte.weight");
+    weights_.position_embedding = device_weights_.at("wpe.weight");
+    weights_.final_layer_norm = layer_norm("ln_f");
+    weights_.blocks.resize(static_cast<std::size_t>(config_.n_layer));
+
+    for (std::size_t layer = 0; layer < weights_.blocks.size(); ++layer) {
+        const std::string prefix = "h." + std::to_string(layer) + ".";
+        auto& block = weights_.blocks[layer];
+
+        block.ln_1 = layer_norm(prefix + "ln_1");
+        block.attention.qkv = linear(prefix + "attn.c_attn");
+        block.attention.output = linear(prefix + "attn.c_proj");
+        block.ln_2 = layer_norm(prefix + "ln_2");
+        block.mlp.expansion = linear(prefix + "mlp.c_fc");
+        block.mlp.projection = linear(prefix + "mlp.c_proj");
+    }
+}
+#endif
+
 void GPT2::validate_tensors() const {
     std::size_t expected_count = 0;
 

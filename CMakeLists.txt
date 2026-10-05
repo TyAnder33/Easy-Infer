@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 
 project(EasyInfer VERSION 0.1.0 LANGUAGES CXX)
 
+option(EASYINFER_ENABLE_CUDA "Build the CUDA kernel library" OFF)
+
 include(FetchContent)
 
 FetchContent_Declare(
@@ -28,6 +30,39 @@ endif()
 
 add_executable(engine src/main.cpp)
 target_link_libraries(engine PRIVATE easyinfer_core)
+
+if(EASYINFER_ENABLE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+
+    add_library(easyinfer_kernels
+        src/kernels/attention.cpp
+        src/kernels/context.cpp
+        src/kernels/device_weight_store.cpp
+        src/kernels/embedding.cu
+        src/kernels/layout.cu
+        src/kernels/normalization.cu
+        src/kernels/rope.cu
+        src/kernels/softmax.cu
+        src/kernels/tensor_ops.cu
+    )
+    target_include_directories(easyinfer_kernels PUBLIC include)
+    target_compile_features(easyinfer_kernels PUBLIC cxx_std_20)
+    target_link_libraries(easyinfer_kernels PUBLIC CUDA::cudart CUDA::cublasLt)
+    set_target_properties(easyinfer_kernels PROPERTIES
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON
+    )
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(easyinfer_kernels PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wconversion>
+        )
+    endif()
+
+    target_compile_definitions(easyinfer_core PUBLIC EASYINFER_ENABLE_CUDA=1)
+    target_link_libraries(easyinfer_core PRIVATE easyinfer_kernels)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)

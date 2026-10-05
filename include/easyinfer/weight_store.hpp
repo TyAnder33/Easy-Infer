@@ -26,6 +26,10 @@ public:
     [[nodiscard]] bool contains(const std::string& name) const;
     [[nodiscard]] const TensorView& at(const std::string& name) const;
     [[nodiscard]] std::size_t size() const;
+    [[nodiscard]] const std::unordered_map<std::string, TensorView>& tensors()
+        const noexcept {
+        return tensors_;
+    }
 
 private:
     void* mapped_file_{nullptr};

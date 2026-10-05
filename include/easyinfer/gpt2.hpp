@@ -9,6 +9,10 @@
 #include "easyinfer/tensor.hpp"
 #include "easyinfer/weight_store.hpp"
 
+#ifdef EASYINFER_ENABLE_CUDA
+#include "easyinfer/device_weight_store.hpp"
+#endif
+
 namespace easyinfer {
 
 struct GPT2LinearWeights {
@@ -53,13 +57,20 @@ public:
 
     [[nodiscard]] std::string_view name() const override;
     [[nodiscard]] std::size_t weight_count() const override;
+    void load_device_weights() override;
     void forward() override;
 
 private:
     void validate_tensors() const;
+#ifdef EASYINFER_ENABLE_CUDA
+    void bind_device_weights();
+#endif
 
     ModelConfig config_;
     WeightStore host_weights_;
+#ifdef EASYINFER_ENABLE_CUDA
+    DeviceWeightStore device_weights_;
+#endif
     GPT2Weights weights_;
 };
 
