@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "easyinfer/device_buffer.hpp"
 #include "easyinfer/tensor.hpp"
 #include "easyinfer/weight_store.hpp"
 
@@ -12,7 +13,6 @@ namespace easyinfer {
 class DeviceWeightStore {
 public:
     DeviceWeightStore() = default;
-    ~DeviceWeightStore();
 
     DeviceWeightStore(const DeviceWeightStore&) = delete;
     DeviceWeightStore& operator=(const DeviceWeightStore&) = delete;
@@ -23,7 +23,7 @@ public:
     [[nodiscard]] std::size_t size() const noexcept { return tensors_.size(); }
 
 private:
-    void* allocation_{nullptr};
+    DeviceBuffer allocation_;
     std::unordered_map<std::string, DeviceTensorView> tensors_;
 };
 

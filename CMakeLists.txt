@@ -38,6 +38,7 @@ if(EASYINFER_ENABLE_CUDA)
     add_library(easyinfer_kernels
         src/kernels/attention.cpp
         src/kernels/context.cpp
+        src/kernels/device_buffer.cpp
         src/kernels/device_weight_store.cpp
         src/kernels/embedding.cu
         src/kernels/layout.cu

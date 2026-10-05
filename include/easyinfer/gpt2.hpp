@@ -58,7 +58,8 @@ public:
     [[nodiscard]] std::string_view name() const override;
     [[nodiscard]] std::size_t weight_count() const override;
     void load_device_weights() override;
-    void forward() override;
+    [[nodiscard]] std::vector<float> forward(
+        const std::vector<std::int32_t>& input_ids) override;
 
 private:
     void validate_tensors() const;

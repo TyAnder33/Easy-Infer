@@ -1,8 +1,13 @@
+#include <algorithm>
+#include <charconv>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "easyinfer/model_config.hpp"
@@ -12,13 +17,48 @@ namespace {
 
 struct CliOptions {
     std::filesystem::path model_directory;
+    std::filesystem::path output_path;
+    std::vector<std::int32_t> input_ids;
     bool inspect{false};
     bool gpu{false};
 };
 
 [[noreturn]] void usage_error(std::string_view message) {
     throw std::runtime_error(std::string(message) +
-                             "\nusage: engine --model <directory> --inspect [--gpu]");
+                             "\nusage:\n"
+                             "  engine --model <directory> --inspect [--gpu]\n"
+                             "  engine --model <directory> --input-ids <id,id,...> "
+                             "--output <file>");
+}
+
+std::vector<std::int32_t> parse_input_ids(std::string_view text) {
+    std::vector<std::int32_t> result;
+    std::size_t start = 0;
+
+    while (start < text.size()) {
+        const auto comma = text.find(',', start);
+        const auto end = comma == std::string_view::npos ? text.size() : comma;
+        std::int32_t token_id = 0;
+        const auto [parsed_end, error] =
+            std::from_chars(text.data() + start, text.data() + end, token_id);
+        if (error != std::errc{} || parsed_end != text.data() + end ||
+            token_id < 0) {
+            usage_error("invalid --input-ids value");
+        }
+        result.push_back(token_id);
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        start = comma + 1;
+        if (start == text.size()) {
+            usage_error("invalid --input-ids value");
+        }
+    }
+
+    if (result.empty()) {
+        usage_error("--input-ids cannot be empty");
+    }
+    return result;
 }
 
 CliOptions parse_cli(int argc, char** argv) {
@@ -35,6 +75,16 @@ CliOptions parse_cli(int argc, char** argv) {
             options.inspect = true;
         } else if (argument == "--gpu") {
             options.gpu = true;
+        } else if (argument == "--input-ids") {
+            if (++i >= argc) {
+                usage_error("--input-ids requires comma-separated token IDs");
+            }
+            options.input_ids = parse_input_ids(argv[i]);
+        } else if (argument == "--output") {
+            if (++i >= argc) {
+                usage_error("--output requires a file path");
+            }
+            options.output_path = argv[i];
         } else {
             usage_error("unknown argument: " + std::string(argument));
         }
@@ -43,8 +93,18 @@ CliOptions parse_cli(int argc, char** argv) {
     if (options.model_directory.empty()) {
         usage_error("missing required --model argument");
     }
-    if (!options.inspect) {
-        usage_error("this milestone only supports --inspect");
+    const bool run_inference = !options.input_ids.empty();
+    if (options.inspect == run_inference) {
+        usage_error("choose either --inspect or --input-ids");
+    }
+    if (run_inference && options.output_path.empty()) {
+        usage_error("inference requires --output");
+    }
+    if (options.inspect && !options.output_path.empty()) {
+        usage_error("--output is only valid with --input-ids");
+    }
+    if (run_inference && options.gpu) {
+        usage_error("inference uses the GPU automatically; omit --gpu");
     }
     return options;
 }
@@ -97,6 +157,27 @@ int main(int argc, char** argv) {
 
         const auto model = easyinfer::create_model(
             config, options.model_directory, safetensor_metadata);
+
+        if (!options.inspect) {
+            model->load_device_weights();
+            const auto logits = model->forward(options.input_ids);
+            std::ofstream output(options.output_path, std::ios::binary);
+            output.write(reinterpret_cast<const char*>(logits.data()),
+                         static_cast<std::streamsize>(logits.size() *
+                                                      sizeof(float)));
+            if (!output) {
+                throw std::runtime_error("could not write " +
+                                         options.output_path.string());
+            }
+
+            const auto next_token = static_cast<std::size_t>(
+                std::max_element(logits.begin(), logits.end()) -
+                logits.begin());
+            std::cout << "Next token ID: " << next_token << '\n'
+                      << "Wrote " << logits.size() << " logits to "
+                      << options.output_path << '\n';
+            return 0;
+        }
 
         if (options.gpu) {
             model->load_device_weights();

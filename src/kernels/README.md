@@ -14,14 +14,15 @@ The layer currently provides:
 - causal softmax and an unfused causal-attention composition
 - KV-cache writes and greedy argmax
 
-The CUDA target is intentionally separate from `easyinfer_core`; nothing is
-wired into `GPT2::forward()` yet. The existing CPU-only inspector therefore
-still builds on machines without CUDA.
+The CUDA target is intentionally separate from `easyinfer_core`. CUDA builds
+use these operations in `GPT2::forward()`, while the CPU-only inspector still
+builds on machines without CUDA.
 
 Build the kernel library on the GPU machine with:
 
 ```sh
-cmake -S . -B build-cuda -DEASYINFER_ENABLE_CUDA=ON
+cmake -S . -B build-cuda -DEASYINFER_ENABLE_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=native
 cmake --build build-cuda -j
 ```
 

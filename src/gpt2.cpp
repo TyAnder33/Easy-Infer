@@ -1,9 +1,17 @@
 #include "easyinfer/gpt2.hpp"
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef EASYINFER_ENABLE_CUDA
+#include "easyinfer/device_buffer.hpp"
+#include "easyinfer/kernels/context.hpp"
+#include "easyinfer/kernels/ops.hpp"
+#include "kernels/cuda_check.hpp"
+#endif
 
 namespace easyinfer {
 
@@ -11,6 +19,10 @@ GPT2::GPT2(ModelConfig config,
            const std::filesystem::path& model_directory,
            const std::vector<TensorMetadata>& metadata)
     : config_(std::move(config)) {
+    if (config_.activation_function != "gelu_new") {
+        throw std::runtime_error("unsupported GPT-2 activation '" +
+                                 config_.activation_function + "'");
+    }
     host_weights_.load_weights(model_directory, metadata);
     validate_tensors();
 }
@@ -127,8 +139,208 @@ void GPT2::validate_tensors() const {
     }
 }
 
-void GPT2::forward() {
-    throw std::runtime_error("GPT-2 forward pass is not implemented");
+std::vector<float> GPT2::forward(
+    const std::vector<std::int32_t>& input_ids) {
+#ifndef EASYINFER_ENABLE_CUDA
+    static_cast<void>(input_ids);
+    throw std::runtime_error("CUDA support is not enabled");
+#else
+    if (device_weights_.size() == 0) {
+        throw std::runtime_error("device weights are not loaded");
+    }
+    if (input_ids.empty() ||
+        input_ids.size() > static_cast<std::size_t>(config_.n_positions)) {
+        throw std::runtime_error("input length is outside the model context");
+    }
+    for (const auto token_id : input_ids) {
+        if (token_id < 0 || token_id >= config_.vocab_size) {
+            throw std::runtime_error("input token ID is outside the vocabulary");
+        }
+    }
+
+    const auto align = [](std::size_t count) {
+        constexpr std::size_t alignment = 64;  // 256 bytes of FP32 values
+        return (count + alignment - 1) & ~(alignment - 1);
+    };
+
+    const auto sequence = static_cast<std::int64_t>(input_ids.size());
+    const auto hidden_size = config_.n_embd;
+    const auto head_dim = config_.head_size();
+    const auto hidden_count = static_cast<std::size_t>(sequence * hidden_size);
+    const auto score_count = static_cast<std::size_t>(
+        config_.n_head * sequence * sequence);
+    const auto vocabulary = static_cast<std::size_t>(config_.vocab_size);
+    const auto workspace_count =
+        align(hidden_count) + align(hidden_count) +
+        align(3 * hidden_count) + align(3 * hidden_count) +
+        align(4 * hidden_count) + align(score_count) + align(vocabulary);
+
+    DeviceBuffer device_input(input_ids.size() * sizeof(std::int32_t));
+    DeviceBuffer workspace(workspace_count * sizeof(float));
+    kernels::KernelContext context;
+
+    kernels::detail::check_cuda(
+        cudaMemcpy(device_input.data(),
+                   input_ids.data(),
+                   device_input.byte_size(),
+                   cudaMemcpyHostToDevice),
+        "copy input token IDs");
+
+    auto* next = static_cast<float*>(workspace.data());
+    const auto take = [&](std::size_t count) {
+        float* result = next;
+        next += align(count);
+        return result;
+    };
+
+    float* hidden = take(hidden_count);
+    float* normalized = take(hidden_count);
+    float* packed = take(3 * hidden_count);
+    float* heads = take(3 * hidden_count);
+    float* mlp = take(4 * hidden_count);
+    float* scores = take(score_count);
+    float* logits = take(vocabulary);
+
+    float* query = heads;
+    float* key = query + hidden_count;
+    float* value = key + hidden_count;
+    float* attention = packed;
+    float* merged = attention + hidden_count;
+
+    const auto data = [](const DeviceTensorView& tensor) {
+        return static_cast<const float*>(tensor.device_data);
+    };
+    const auto stream = context.stream();
+    const auto epsilon = static_cast<float>(config_.layer_norm_epsilon);
+
+    kernels::embedding_f32(
+        stream,
+        static_cast<const std::int32_t*>(device_input.data()),
+        data(weights_.token_embedding),
+        data(weights_.position_embedding),
+        hidden,
+        1,
+        sequence,
+        hidden_size,
+        0);
+
+    for (const auto& block : weights_.blocks) {
+        kernels::layer_norm_f32(stream,
+                                hidden,
+                                data(block.ln_1.weight),
+                                data(block.ln_1.bias),
+                                normalized,
+                                sequence,
+                                hidden_size,
+                                epsilon);
+        kernels::linear_f32(context,
+                            normalized,
+                            data(block.attention.qkv.weight),
+                            data(block.attention.qkv.bias),
+                            packed,
+                            sequence,
+                            hidden_size,
+                            3 * hidden_size,
+                            kernels::WeightLayout::InputOutput);
+        kernels::split_qkv_f32(stream,
+                               packed,
+                               query,
+                               key,
+                               value,
+                               1,
+                               sequence,
+                               config_.n_head,
+                               head_dim);
+        kernels::causal_attention_f32(context,
+                                      query,
+                                      key,
+                                      value,
+                                      scores,
+                                      attention,
+                                      1,
+                                      config_.n_head,
+                                      sequence,
+                                      sequence,
+                                      head_dim,
+                                      0);
+        kernels::merge_heads_f32(stream,
+                                 attention,
+                                 merged,
+                                 1,
+                                 sequence,
+                                 config_.n_head,
+                                 head_dim);
+        kernels::linear_f32(context,
+                            merged,
+                            data(block.attention.output.weight),
+                            data(block.attention.output.bias),
+                            normalized,
+                            sequence,
+                            hidden_size,
+                            hidden_size,
+                            kernels::WeightLayout::InputOutput);
+        kernels::add_in_place_f32(
+            stream, hidden, normalized, hidden_count);
+
+        kernels::layer_norm_f32(stream,
+                                hidden,
+                                data(block.ln_2.weight),
+                                data(block.ln_2.bias),
+                                normalized,
+                                sequence,
+                                hidden_size,
+                                epsilon);
+        kernels::linear_f32(context,
+                            normalized,
+                            data(block.mlp.expansion.weight),
+                            data(block.mlp.expansion.bias),
+                            mlp,
+                            sequence,
+                            hidden_size,
+                            4 * hidden_size,
+                            kernels::WeightLayout::InputOutput);
+        kernels::gelu_f32(stream, mlp, 4 * hidden_count);
+        kernels::linear_f32(context,
+                            mlp,
+                            data(block.mlp.projection.weight),
+                            data(block.mlp.projection.bias),
+                            normalized,
+                            sequence,
+                            4 * hidden_size,
+                            hidden_size,
+                            kernels::WeightLayout::InputOutput);
+        kernels::add_in_place_f32(
+            stream, hidden, normalized, hidden_count);
+    }
+
+    kernels::layer_norm_f32(stream,
+                            hidden,
+                            data(weights_.final_layer_norm.weight),
+                            data(weights_.final_layer_norm.bias),
+                            normalized,
+                            sequence,
+                            hidden_size,
+                            epsilon);
+    kernels::linear_f32(
+        context,
+        normalized + (sequence - 1) * hidden_size,
+        data(weights_.token_embedding),
+        nullptr,
+        logits,
+        1,
+        hidden_size,
+        config_.vocab_size,
+        kernels::WeightLayout::OutputInput);
+
+    context.synchronize();
+    std::vector<float> result(vocabulary);
+    kernels::detail::check_cuda(cudaMemcpy(result.data(),
+                                           logits,
+                                           result.size() * sizeof(float),
+                                           cudaMemcpyDeviceToHost),
+                                "copy output logits");
+    return result;
+#endif
 }
 
 }  // namespace easyinfer
